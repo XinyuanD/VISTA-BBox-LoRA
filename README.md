@@ -140,7 +140,7 @@ python benchmark/compute_fvd.py \
 
 ### Agent Consistency
 
-Agent Consistency is evaluated using the metric implementation from [DrivingGen](https://github.com/NVlabs/DrivingGen).
+Agent Consistency is evaluated using the metric implementation from [DrivingGen](https://github.com/youngzhou1999/DrivingGen).
 
 Because the evaluator depends on the DrivingGen codebase and environment, this metric is run separately from the VISTA environment. We use a custom `benchmark/agent_consistency_wrapper.py` wrapper placed inside a local DrivingGen checkout to prepare VISTA-generated sequences and invoke the DrivingGen evaluator.
 
