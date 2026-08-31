@@ -16,10 +16,14 @@ from train import save_img_seq_to_video
 from vwm.modules.diffusionmodules.sampling import EulerEDMSampler
 from vwm.util import default, instantiate_from_config
 
-
-def init_model(version_dict, load_ckpt=True):
+# bbox
+def init_model(version_dict, load_ckpt=True, bbox_ckpt=None):
     config = OmegaConf.load(version_dict["config"])
-    model = load_model_from_config(config, version_dict["ckpt"] if load_ckpt else None)
+    model = load_model_from_config(
+        config,
+        version_dict["ckpt"] if load_ckpt else None,
+        bbox_ckpt=bbox_ckpt,
+    )
     return model
 
 
@@ -50,8 +54,49 @@ def unload_model(model):
         model.cpu()
         torch.cuda.empty_cache()
 
+# bbox
+def load_bbox_weights(model, bbox_ckpt):
+    print(f"Loading BBox LoRA weights from {bbox_ckpt}")
 
-def load_model_from_config(config, ckpt=None):
+    bbox_state_dict = load_safetensors(bbox_ckpt)
+
+    model_state_dict = model.state_dict()
+
+    expected_bbox_keys = {
+        key for key in model_state_dict.keys()
+        if "bbox" in key
+    }
+
+    loaded_bbox_keys = set(bbox_state_dict.keys())
+
+    missing_bbox_keys = expected_bbox_keys - loaded_bbox_keys
+    unexpected_bbox_keys = loaded_bbox_keys - expected_bbox_keys
+
+    if missing_bbox_keys:
+        raise RuntimeError(
+            "BBox checkpoint is missing expected parameters:\n"
+            + "\n".join(sorted(missing_bbox_keys))
+        )
+
+    if unexpected_bbox_keys:
+        raise RuntimeError(
+            "BBox checkpoint contains unexpected parameters:\n"
+            + "\n".join(sorted(unexpected_bbox_keys))
+        )
+
+    model.load_state_dict(bbox_state_dict, strict=False)
+
+    total_params = sum(
+        tensor.numel()
+        for tensor in bbox_state_dict.values()
+    )
+
+    print(
+        f"Loaded {len(bbox_state_dict)} BBox tensors "
+        f"({total_params:,} parameters)"
+    )
+
+def load_model_from_config(config, ckpt=None, bbox_ckpt=None):
     model = instantiate_from_config(config.model)
 
     if ckpt is not None:
@@ -74,6 +119,10 @@ def load_model_from_config(config, ckpt=None):
             print(f"Missing keys: {missing}")
         if len(unexpected) > 0:
             print(f"Unexpected keys: {unexpected}")
+
+    # Load BBox-specific trained weights on top of VISTA.
+    if bbox_ckpt is not None:
+        load_bbox_weights(model, bbox_ckpt)
 
     model = initial_model_load(model)
     model.eval()
@@ -281,6 +330,48 @@ def fill_latent(cond, length, cond_indices, device):
     latent[cond_indices] = cond
     return latent
 
+# bbox
+def adjust_lowres_bbox_coords(
+    bbox_coords,
+    bbox_valid_mask,
+):
+    """
+    Convert normalized [cx, cy, w, h] boxes generated for
+    1024x576 to the stage-1 576x320 VISTA crop.
+    """
+
+    coords = bbox_coords.clone()
+    B = coords.shape[0]
+
+    for b in range(B):
+        valid = bbox_valid_mask[b]
+
+        if not valid.any():
+            continue
+
+        boxes = coords[b, valid]
+
+        cy = boxes[:, 1]
+        bh = boxes[:, 3]
+
+        # Original normalized coordinates correspond to 1600x900.
+        y1 = (cy - bh / 2.0) * 900.0
+        y2 = (cy + bh / 2.0) * 900.0
+
+        # 576x320 VISTA crop: y=[6, 894)
+        y1 = torch.clamp(y1, 6.0, 894.0)
+        y2 = torch.clamp(y2, 6.0, 894.0)
+
+        # Normalize relative to the 888-pixel crop.
+        y1 = (y1 - 6.0) / 888.0
+        y2 = (y2 - 6.0) / 888.0
+
+        boxes[:, 1] = (y1 + y2) / 2.0
+        boxes[:, 3] = y2 - y1
+
+        coords[b, valid] = boxes
+
+    return coords
 
 @torch.no_grad()
 def do_sample(
@@ -292,6 +383,12 @@ def do_sample(
         num_frames,
         force_uc_zero_embeddings: Optional[List] = None,
         initial_cond_indices: Optional[List] = None,
+        
+        # bbox
+        bbox_classes=None,
+        bbox_coords=None,
+        bbox_valid_mask=None,
+        
         device="cuda"
 ):
     if initial_cond_indices is None:
@@ -311,8 +408,45 @@ def do_sample(
 
         sampling_progress = tqdm(total=num_rounds, desc="Dreaming")
 
+        # def denoiser(x, sigma, cond, cond_mask):
+        #     return model.denoiser(model.model, x, sigma, cond, cond_mask)
+        
+        # bbox
         def denoiser(x, sigma, cond, cond_mask):
-            return model.denoiser(model.model, x, sigma, cond, cond_mask)
+            curr_bbox_classes = bbox_classes
+            curr_bbox_coords = bbox_coords
+            curr_bbox_valid_mask = bbox_valid_mask
+
+            if curr_bbox_classes is not None:
+                # Number of video samples being passed through the UNet.
+                # VanillaCFG duplicates the model input, so normally this is 2.
+                model_batch_size = x.shape[0] // num_frames
+
+                if curr_bbox_classes.shape[0] != model_batch_size:
+                    assert curr_bbox_classes.shape[0] == 1
+
+                    curr_bbox_classes = curr_bbox_classes.repeat(
+                        model_batch_size, 1
+                    )
+
+                    curr_bbox_coords = curr_bbox_coords.repeat(
+                        model_batch_size, 1, 1
+                    )
+
+                    curr_bbox_valid_mask = curr_bbox_valid_mask.repeat(
+                        model_batch_size, 1
+                    )
+
+            return model.denoiser(
+                model.model,
+                x,
+                sigma,
+                cond,
+                cond_mask,
+                bbox_classes=curr_bbox_classes,
+                bbox_coords=curr_bbox_coords,
+                bbox_valid_mask=curr_bbox_valid_mask
+            )
 
         load_model(model.denoiser)
         load_model(model.model)

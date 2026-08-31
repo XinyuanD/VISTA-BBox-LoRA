@@ -25,14 +25,26 @@ class Denoiser(nn.Module):
             noised_input: torch.Tensor,
             sigma: torch.Tensor,
             cond: Dict,
-            cond_mask: torch.Tensor
+            cond_mask: torch.Tensor,
+            **kwargs # bbox
     ):
         sigma = self.possibly_quantize_sigma(sigma)
         sigma_shape = sigma.shape
         sigma = append_dims(sigma, noised_input.ndim)
         c_skip, c_out, c_in, c_noise = self.scaling(sigma)
         c_noise = self.possibly_quantize_c_noise(c_noise.reshape(sigma_shape))
-        return (network(noised_input * c_in, c_noise, cond, cond_mask, self.num_frames) * c_out + noised_input * c_skip)
+        return ( # bbox
+            network(
+                noised_input * c_in,
+                c_noise,
+                cond,
+                cond_mask,
+                self.num_frames,
+                **kwargs,
+            )
+            * c_out
+            + noised_input * c_skip
+        )
 
 
 class DiscreteDenoiser(Denoiser):

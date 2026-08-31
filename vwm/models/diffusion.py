@@ -75,15 +75,18 @@ class DiffusionEngine(LightningModule):
             else None
         )
 
-        # if slow_spatial_layers:
-        #     for n, p in self.model.named_parameters():
-        #         if "time_stack" not in n:
-        #             p.requires_grad = False
-        # elif train_peft_adapters:
-        #     for n, p in self.model.named_parameters():
-        #         if "adapter" not in n and p.requires_grad:
-        #             p.requires_grad = False
-
+        # bbox
+        if train_peft_adapters:
+            for n, p in self.model.named_parameters():            
+                if "bbox" in n:
+                    p.requires_grad = True
+                else:
+                    p.requires_grad = False
+            
+            for n, p in self.model.named_parameters():
+                if p.requires_grad:
+                    assert "bbox" in n, f"Unexpected trainable parameter: {n}"
+        
         self.use_ema = use_ema
         self.ema_decay_rate = ema_decay_rate
         if use_ema:
@@ -218,7 +221,49 @@ class DiffusionEngine(LightningModule):
             lr = self.optimizers().param_groups[0]["lr"]
             self.log("lr_abs", lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
         return loss
+    
+    # remove
+    # def on_after_backward(self):
+    #     target = "model.diffusion_model.input_blocks.1.1.time_stack.0.attn2"
 
+    #     print(f"\n===== BBOX GRADS step={self.global_step} =====")
+
+    #     for name, param in self.named_parameters():
+    #         if target not in name:
+    #             continue
+
+    #         if not any(s in name for s in [
+    #             "bbox_q_adapter_down",
+    #             "bbox_q_adapter_up",
+    #             "bbox_k_adapter_down",
+    #             "bbox_k_adapter_up",
+    #             "bbox_v_adapter_down",
+    #             "bbox_v_adapter_up",
+    #             "k_adapter_bbox",
+    #             "v_adapter_bbox",
+    #         ]):
+    #             continue
+
+    #         if param.grad is None:
+    #             print(name, "grad=None")
+    #         else:
+    #             print(
+    #                 name,
+    #                 "grad_max=",
+    #                 param.grad.abs().max().item()
+    #             )
+
+    #     # Also check one bbox encoder weight
+    #     p = self.model.diffusion_model.bbox_encoder.class_embedding.weight
+
+    #     print(
+    #         "bbox_encoder.class_embedding.weight",
+    #         "grad_max=",
+    #         None if p.grad is None else p.grad.abs().max().item()
+    #     )
+
+    #     print("====================================\n")
+    
     # @torch.no_grad()
     # def validation_step(self, batch, batch_idx):
     #     loss, loss_dict = self.shared_step(batch)
@@ -270,9 +315,16 @@ class DiffusionEngine(LightningModule):
                 }
             ]
         elif self.train_peft_adapters:
+            # bbox
+            bbox_params = [
+                p
+                for n, p in self.model.named_parameters()
+                if p.requires_grad
+            ]
+
             param_dicts = [
                 {
-                    "params": [p for n, p in self.model.named_parameters() if "adapter" in n]
+                    "params": bbox_params
                 }
             ]
         else:
@@ -288,6 +340,7 @@ class DiffusionEngine(LightningModule):
                         "params": list(embedder.parameters())
                     }
                 )
+        
         opt = self.instantiate_optimizer_from_config(param_dicts, lr, self.optimizer_config)
         if self.scheduler_config is not None:
             scheduler = instantiate_from_config(self.scheduler_config)

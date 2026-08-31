@@ -17,8 +17,8 @@ VERSION2SPECS = {
 
 DATASET2SOURCES = {
     "NUSCENES": {
-        "data_root": "data/nuscenes",
-        "anno_file": "annos/nuScenes_val.json"
+        "data_root": "vwm/data/nuscenes",
+        "anno_file": "vwm/data/annos/nuScenes_bbox_val.json"
     },
     "IMG": {
         "data_root": "image_folder"
@@ -116,12 +116,62 @@ def parse_args(**parser_kwargs):
         action="store_true",
         help="whether to save memory or not"
     )
+    parser.add_argument(
+        "--indices_file",
+        type=str,
+        default=None,
+        help="optional text file containing dataset indices to generate"
+    )
+    
+    parser.add_argument(
+        "--bbox_ckpt",
+        type=str,
+        default=None,
+        help="path to BBox LoRA safetensors checkpoint"
+    )
+        
     return parser
 
+# bbox
+def get_bbox_condition(sample_dict, max_objects=32):
+    bboxes = sample_dict.get("bboxes", [])
+
+    # Same rule as training: if too many objects,
+    # keep the largest boxes by area.
+    if len(bboxes) > max_objects:
+        bboxes = sorted(
+            bboxes,
+            key=lambda b: b[3] * b[4],
+            reverse=True,
+        )[:max_objects]
+
+    bbox_classes = torch.zeros(max_objects, dtype=torch.long)
+    bbox_coords = torch.zeros((max_objects, 4), dtype=torch.float32)
+    bbox_valid_mask = torch.zeros(max_objects, dtype=torch.bool)
+
+    if len(bboxes) > 0:
+        bboxes = torch.tensor(bboxes, dtype=torch.float32)
+        n = bboxes.shape[0]
+
+        bbox_classes[:n] = bboxes[:, 0].long()
+        bbox_coords[:n] = bboxes[:, 1:5]
+        bbox_valid_mask[:n] = True
+
+    # Add batch dimension:
+    # classes: [1, N]
+    # coords:  [1, N, 4]
+    # mask:    [1, N]
+    return (
+        bbox_classes.unsqueeze(0),
+        bbox_coords.unsqueeze(0),
+        bbox_valid_mask.unsqueeze(0)
+    )
 
 def get_sample(selected_index=0, dataset_name="NUSCENES", num_frames=25, action_mode="free"):
     dataset_dict = DATASET2SOURCES[dataset_name]
     action_dict = None
+    # bbox
+    bbox_condition = None
     if dataset_name == "IMG":
         image_list = os.listdir(dataset_dict["data_root"])
         total_length = len(image_list)
@@ -137,6 +187,7 @@ def get_sample(selected_index=0, dataset_name="NUSCENES", num_frames=25, action_
         while selected_index >= total_length:
             selected_index -= total_length
         sample_dict = all_samples[selected_index]
+        bbox_condition = get_bbox_condition(sample_dict)
 
         path_list = list()
         if dataset_name == "NUSCENES":
@@ -168,7 +219,7 @@ def get_sample(selected_index=0, dataset_name="NUSCENES", num_frames=25, action_
                     raise ValueError(f"Unsupported action mode {action_mode}")
         else:
             raise ValueError(f"Invalid dataset {dataset_name}")
-    return path_list, selected_index, total_length, action_dict
+    return path_list, selected_index, total_length, action_dict, bbox_condition # bbox
 
 
 def load_img(file_name, target_height=320, target_width=576, device="cuda"):
@@ -205,19 +256,39 @@ if __name__ == "__main__":
     parser = parse_args()
     opt, unknown = parser.parse_known_args()
 
+    if opt.indices_file is not None:
+        with open(opt.indices_file, "r") as f:
+            eval_indices = [int(line.strip()) for line in f if line.strip()]
+    else:
+        eval_indices = None
+    
     set_lowvram_mode(opt.low_vram)
     version_dict = VERSION2SPECS[opt.version]
-    model = init_model(version_dict)
+    model = init_model(version_dict, bbox_ckpt=opt.bbox_ckpt)
     unique_keys = set([x.input_key for x in model.conditioner.embedders])
 
-    sample_index = 0
+    if eval_indices is not None:
+        eval_pos = 0
+        sample_index = eval_indices[eval_pos]
+    else:
+        sample_index = 0
+
     while sample_index >= 0:
+        if eval_indices is not None:
+            print(
+                f"Generating subset sample {eval_pos + 1}/{len(eval_indices)} "
+                f"(dataset index {sample_index})"
+            )
+
         seed_everything(opt.seed)
 
-        frame_list, sample_index, dataset_length, action_dict = get_sample(sample_index,
+        frame_list, sample_index, dataset_length, action_dict, bbox_condition = get_sample(sample_index,
                                                                            opt.dataset,
                                                                            opt.n_frames,
                                                                            opt.action)
+
+        if opt.bbox_ckpt is None:
+            bbox_condition = None
 
         img_seq = list()
         for each_path in frame_list:
@@ -242,6 +313,39 @@ if __name__ == "__main__":
 
         uc_keys = ["cond_frames", "cond_frames_without_noise", "command", "trajectory", "speed", "angle", "goal"]
 
+        # bbox
+        if bbox_condition is not None:
+            bbox_classes, bbox_coords, bbox_valid_mask = bbox_condition
+
+            bbox_classes = bbox_classes.cuda()
+            bbox_coords = bbox_coords.cuda()
+            bbox_valid_mask = bbox_valid_mask.cuda()
+
+            # bbox
+            if opt.width == 576 and opt.height == 320:
+                bbox_coords = adjust_lowres_bbox_coords(
+                    bbox_coords,
+                    bbox_valid_mask,
+                )
+            elif opt.width == 1024 and opt.height == 576:
+                # Original bbox coordinates already match this resolution.
+                pass
+            else:
+                raise ValueError(
+                    f"Unsupported inference resolution: "
+                    f"{opt.width}x{opt.height}"
+                )
+
+            print(
+                f"BBox inference: "
+                f"{bbox_valid_mask.sum().item()} valid objects"
+            )
+            
+        else:
+            bbox_classes = None
+            bbox_coords = None
+            bbox_valid_mask = None
+        
         out = do_sample(
             images,
             model,
@@ -250,7 +354,12 @@ if __name__ == "__main__":
             num_rounds=opt.n_rounds,
             num_frames=opt.n_frames,
             force_uc_zero_embeddings=uc_keys,
-            initial_cond_indices=[index for index in range(opt.n_conds)]
+            initial_cond_indices=[index for index in range(opt.n_conds)],
+            
+            # bbox
+            bbox_classes=bbox_classes,
+            bbox_coords=bbox_coords,
+            bbox_valid_mask=bbox_valid_mask
         )
 
         if isinstance(out, (tuple, list)):
@@ -266,8 +375,17 @@ if __name__ == "__main__":
         else:
             raise TypeError
 
-        if opt.rand_gen:
+        if eval_indices is not None:
+            eval_pos += 1
+
+            if eval_pos >= len(eval_indices):
+                sample_index = -1
+            else:
+                sample_index = eval_indices[eval_pos]
+
+        elif opt.rand_gen:
             sample_index += random.randint(1, dataset_length - 1)
+
         else:
             sample_index += 1
             if dataset_length <= sample_index:

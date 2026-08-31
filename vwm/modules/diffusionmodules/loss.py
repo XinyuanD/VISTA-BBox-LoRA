@@ -57,14 +57,15 @@ class StandardDiffusionLoss(nn.Module):
             batch: Dict
     ) -> torch.Tensor:
         cond = conditioner(batch)
-        return self._forward(network, denoiser, cond, input)
+        return self._forward(network, denoiser, cond, input, batch) # bbox
 
     def _forward(
             self,
             network: nn.Module,
             denoiser: Denoiser,
             cond: Dict,
-            input: torch.Tensor
+            input: torch.Tensor,
+            batch: Dict    # bbox
     ):
         sigmas = self.sigma_sampler(input.shape[0]).to(input)
         cond_mask = torch.zeros_like(sigmas)
@@ -90,7 +91,10 @@ class StandardDiffusionLoss(nn.Module):
             sigmas_bc = append_dims(sigmas, input.ndim)
         noised_input = self.get_noised_input(sigmas_bc, noise, input)
 
-        model_output = denoiser(network, noised_input, sigmas, cond, cond_mask)
+        model_output = denoiser(network, noised_input, sigmas, cond, cond_mask,
+                                bbox_classes=batch.get("bbox_classes", None),
+                                bbox_coords=batch.get("bbox_coords", None),
+                                bbox_valid_mask=batch.get("bbox_valid_mask", None)) # bbox
         w = append_dims(self.loss_weighting(sigmas), input.ndim)
 
         if self.replace_cond_frames:  # ignore mask predictions

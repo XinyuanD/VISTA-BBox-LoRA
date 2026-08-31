@@ -166,3 +166,22 @@ logs/
 
 .DS_Store
 */.DS_Store
+
+# Local editor settings
+.vscode/
+
+# Model weights / checkpoints
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Allow released BBox LoRA checkpoint
+!ckpts/bbox_lora_5k.safetensors
+
+# Generated evaluation caches
+cache/
+
+# nuScenes dataset
+vwm/data/nuscenes

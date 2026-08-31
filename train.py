@@ -636,7 +636,7 @@ if __name__ == "__main__":
         model = instantiate_from_config(config.model)
 
         # use pretrained model
-        if not opt.resume or opt.finetune:
+        if ckpt_resume_path is None:
             if not opt.finetune or not os.path.exists(opt.finetune):
                 default_ckpt = "ckpts/svd_xt.safetensors"
                 print(f"Loading pretrained model from {default_ckpt}")
@@ -890,7 +890,39 @@ if __name__ == "__main__":
 
         signal.signal(signal.SIGUSR1, melk)
         signal.signal(signal.SIGUSR2, divein)
+        
+        # remove
+        print("\n===== TRAINABLE PARAMETERS =====")
 
+        bbox_params = 0
+        other_params = 0
+
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            n = param.numel()
+
+            if "bbox" in name.lower():
+                tag = "[BBOX]"
+                bbox_params += n
+            else:
+                tag = "[OTHER]"
+                other_params += n
+
+            print(
+                f"{tag:8s} "
+                f"{name:100s} "
+                f"shape={tuple(param.shape)} "
+                f"params={n:,}"
+            )
+
+        print("\n===== TRAINABLE PARAM SUMMARY =====")
+        print(f"BBox trainable:  {bbox_params:,}")
+        print(f"Other trainable: {other_params:,}")
+        print(f"Total trainable: {bbox_params + other_params:,}")
+        print("===================================\n")
+        
         # run
         if opt.train:
             trainer.fit(model, data, ckpt_path=ckpt_resume_path)

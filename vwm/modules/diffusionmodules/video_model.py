@@ -110,7 +110,11 @@ class VideoUNet(nn.Module):
             disable_temporal_crossattention: bool = False,
             max_ddpm_temb_period: int = 10000,
             add_lora: bool = False,
-            action_control: bool = False
+            action_control: bool = False,
+            
+            # bbox
+            bbox_control=False,
+            bbox_dim=256
     ):
         super().__init__()
         assert context_dim is not None
@@ -132,6 +136,15 @@ class VideoUNet(nn.Module):
         transformer_depth_middle = default(
             transformer_depth_middle, transformer_depth[-1]
         )
+
+        # bbox
+        self.bbox_control = bbox_control
+        if bbox_control:
+            from vwm.modules.bbox_encoder import BBoxEncoder
+
+            self.bbox_encoder = BBoxEncoder(
+                out_dim=bbox_dim
+            )
 
         self.num_res_blocks = num_res_blocks
         self.attention_resolutions = attention_resolutions
@@ -204,7 +217,11 @@ class VideoUNet(nn.Module):
                 use_checkpoint=False,
                 disabled_sa=False,
                 add_lora=False,
-                action_control=False
+                action_control=False,
+                
+                # bbox
+                bbox_control=False,
+                bbox_dim=256
         ):
             return SpatialVideoTransformer(
                 ch,
@@ -225,7 +242,11 @@ class VideoUNet(nn.Module):
                 disable_temporal_crossattention=disable_temporal_crossattention,
                 max_time_embed_period=max_ddpm_temb_period,
                 add_lora=add_lora,
-                action_control=action_control
+                action_control=action_control,
+                
+                # bbox
+                bbox_control=bbox_control,
+                bbox_dim=bbox_dim
             )
 
         def get_resblock(
@@ -291,7 +312,11 @@ class VideoUNet(nn.Module):
                             use_checkpoint=use_checkpoint,
                             disabled_sa=False,
                             add_lora=add_lora,
-                            action_control=action_control
+                            action_control=action_control,
+                            
+                            # bbox
+                            bbox_control=bbox_control,
+                            bbox_dim=bbox_dim
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -351,7 +376,11 @@ class VideoUNet(nn.Module):
                 context_dim=context_dim,
                 use_checkpoint=use_checkpoint,
                 add_lora=add_lora,
-                action_control=action_control
+                action_control=action_control,
+                
+                # bbox
+                bbox_control=bbox_control,
+                bbox_dim=bbox_dim
             ),
             get_resblock(
                 merge_factor=merge_factor,
@@ -404,7 +433,11 @@ class VideoUNet(nn.Module):
                             use_checkpoint=use_checkpoint,
                             disabled_sa=False,
                             add_lora=add_lora,
-                            action_control=action_control
+                            action_control=action_control,
+                            
+                            # bbox
+                            bbox_control=bbox_control,
+                            bbox_dim=bbox_dim
                         )
                     )
                 if level and i == num_res_blocks:
@@ -447,8 +480,19 @@ class VideoUNet(nn.Module):
             y: Optional[torch.Tensor] = None,
             time_context: Optional[torch.Tensor] = None,
             cond_mask: Optional[torch.Tensor] = None,
-            num_frames: Optional[int] = None
+            num_frames: Optional[int] = None,
+            
+            # bbox
+            bbox_classes=None,
+            bbox_coords=None,
+            bbox_mask=None
     ):
+        
+        # bbox
+        bbox_features = None
+        if self.bbox_control and bbox_classes is not None:
+            bbox_features = self.bbox_encoder(bbox_classes, bbox_coords)
+        
         assert (y is not None) == (
                 self.num_classes is not None
         ), "Must specify y if and only if the model is class-conditional"
@@ -477,7 +521,12 @@ class VideoUNet(nn.Module):
                 emb,
                 context=context,
                 time_context=time_context,
-                num_frames=num_frames
+                num_frames=num_frames,
+                
+                # bbox
+                bbox_features=bbox_features,
+                bbox_coords=bbox_coords,
+                bbox_mask=bbox_mask
             )
             hs.append(h)
 
@@ -486,7 +535,12 @@ class VideoUNet(nn.Module):
             emb,
             context=context,
             time_context=time_context,
-            num_frames=num_frames
+            num_frames=num_frames,
+            
+            # bbox
+            bbox_features=bbox_features,
+            bbox_coords=bbox_coords,
+            bbox_mask=bbox_mask
         )
 
         for module in self.output_blocks:
@@ -496,7 +550,12 @@ class VideoUNet(nn.Module):
                 emb,
                 context=context,
                 time_context=time_context,
-                num_frames=num_frames
+                num_frames=num_frames,
+                
+                # bbox
+                bbox_features=bbox_features,
+                bbox_coords=bbox_coords,
+                bbox_mask=bbox_mask
             )
 
         h = h.type(x.dtype)

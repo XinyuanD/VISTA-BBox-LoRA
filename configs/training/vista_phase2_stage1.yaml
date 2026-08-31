@@ -2,7 +2,7 @@ model:
   base_learning_rate: 5.e-5
   target: vwm.models.diffusion.DiffusionEngine
   params:
-    use_ema: True
+    use_ema: False
     input_key: img_seq
     scale_factor: 0.18215
     disable_first_stage_autocast: True
@@ -27,7 +27,7 @@ model:
       params:
         adm_in_channels: 768
         num_classes: sequential
-        use_checkpoint: True
+        use_checkpoint: False
         in_channels: 8
         out_channels: 4
         model_channels: 320
@@ -43,8 +43,12 @@ model:
         use_spatial_context: True
         merge_strategy: learned_with_images
         video_kernel_size: [ 3, 1, 1 ]
-        add_lora: True
+        add_lora: False
         action_control: True
+
+        # bbox
+        bbox_control: True
+        bbox_dim: 256
 
     conditioner_config:
       target: vwm.modules.GeneralConditioner
@@ -203,9 +207,9 @@ model:
     scheduler_config:
       target: vwm.lr_scheduler.LambdaLinearScheduler
       params:
-        warm_up_steps: [ 1000 ]
+        warm_up_steps: [ 100 ]
         cycle_lengths: [ 10000000000000 ]
-        f_start: [ 1.e-6 ]
+        f_start: [ 0.1 ]
         f_max: [ 1. ]
         f_min: [ 1. ]
 
@@ -256,10 +260,8 @@ data:
     batch_size: 1
     num_workers: 16
     subsets:
-      - YouTube
       - NuScenes
     probs:
-      - 1
       - 1
     samples_per_epoch: 256000
     target_height: 320
@@ -272,7 +274,7 @@ lightning:
       target: train.ImageLogger
       params:
         num_frames: *num_frames
-        disabled: False
+        disabled: True
         enable_autocast: False
         batch_frequency: 1000
         increase_log_steps: True
@@ -282,13 +284,14 @@ lightning:
 
   modelcheckpoint:
     params:
-      every_n_epochs: 1  # every_n_train_steps: 5000, set the same as image_logger batch_frequency
+      every_n_train_steps: 500
+      save_last: True
 
   trainer:
-    devices: 0,1
+    devices: 0
     benchmark: True
     num_sanity_val_steps: 0
     accumulate_grad_batches: 1
+    max_steps: 5000
     max_epochs: 100
-    strategy: deepspeed_stage_2
     gradient_clip_val: 0.3

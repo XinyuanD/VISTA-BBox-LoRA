@@ -29,6 +29,11 @@ class OpenAIWrapper(IdentityWrapper):
             assert c["concat"].shape[0] == x.shape[0] // num_frames, f"{c['concat'].shape} {x.shape}"
             c["concat"] = repeat_as_img_seq(c["concat"], num_frames)
         x = torch.cat((x, c.get("concat", torch.Tensor(list()).type_as(x))), dim=1)
+        
+        # bbox: normalize naming before passing to VideoUNet
+        if "bbox_valid_mask" in kwargs:
+            kwargs["bbox_mask"] = kwargs.pop("bbox_valid_mask")
+        
         return self.diffusion_model(
             x,
             timesteps=t,

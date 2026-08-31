@@ -258,6 +258,12 @@ class MemoryEfficientCrossAttention(nn.Module):  # we are using this implementat
             lora_rank=16,
             lora_scale=1.0,
             action_control=False,
+            
+            # bbox
+            bbox_control=False,
+            bbox_dim=256,
+            bbox_lora_rank=16,
+            bbox_lora_scale=1.0,
             **kwargs
     ):
         super().__init__()
@@ -322,6 +328,119 @@ class MemoryEfficientCrossAttention(nn.Module):  # we are using this implementat
             nn.init.zeros_(self.k_adapter_action_control.weight)
             self.v_adapter_action_control = nn.Linear(128 * 19, inner_dim, bias=False)
             nn.init.zeros_(self.v_adapter_action_control.weight)
+        
+        # bbox
+        self.bbox_control = bbox_control
+
+        if bbox_control:
+            self.bbox_lora_scale = bbox_lora_scale
+
+            # -------------------------------------------------
+            # Direct bbox conditioning projections
+            # bbox_context [B*HW, 1, bbox_dim]
+            #            -> [B*HW, 1, inner_dim]
+            # -------------------------------------------------
+            self.k_adapter_bbox = nn.Linear(
+                bbox_dim,
+                inner_dim,
+                bias=False
+            )
+            self.v_adapter_bbox = nn.Linear(
+                bbox_dim,
+                inner_dim,
+                bias=False
+            )
+
+            nn.init.zeros_(self.k_adapter_bbox.weight)
+            nn.init.zeros_(self.v_adapter_bbox.weight)
+
+            # -------------------------------------------------
+            # Bbox-specific LoRA for Q
+            # -------------------------------------------------
+            self.bbox_q_adapter_down = nn.Linear(
+                query_dim,
+                bbox_lora_rank,
+                bias=False
+            )
+            nn.init.normal_(
+                self.bbox_q_adapter_down.weight,
+                std=1 / bbox_lora_rank
+            )
+
+            self.bbox_q_adapter_up = nn.Linear(
+                bbox_lora_rank,
+                inner_dim,
+                bias=False
+            )
+            nn.init.zeros_(
+                self.bbox_q_adapter_up.weight
+            )
+
+            # -------------------------------------------------
+            # Bbox-specific LoRA for K
+            # -------------------------------------------------
+            self.bbox_k_adapter_down = nn.Linear(
+                context_dim,
+                bbox_lora_rank,
+                bias=False
+            )
+            nn.init.normal_(
+                self.bbox_k_adapter_down.weight,
+                std=1 / bbox_lora_rank
+            )
+
+            self.bbox_k_adapter_up = nn.Linear(
+                bbox_lora_rank,
+                inner_dim,
+                bias=False
+            )
+            nn.init.zeros_(
+                self.bbox_k_adapter_up.weight
+            )
+
+            # -------------------------------------------------
+            # Bbox-specific LoRA for V
+            # -------------------------------------------------
+            self.bbox_v_adapter_down = nn.Linear(
+                context_dim,
+                bbox_lora_rank,
+                bias=False
+            )
+            nn.init.normal_(
+                self.bbox_v_adapter_down.weight,
+                std=1 / bbox_lora_rank
+            )
+
+            self.bbox_v_adapter_up = nn.Linear(
+                bbox_lora_rank,
+                inner_dim,
+                bias=False
+            )
+            nn.init.zeros_(
+                self.bbox_v_adapter_up.weight
+            )
+
+            # -------------------------------------------------
+            # Bbox-specific LoRA for output projection
+            # -------------------------------------------------
+            self.bbox_out_adapter_down = nn.Linear(
+                inner_dim,
+                bbox_lora_rank,
+                bias=False
+            )
+            nn.init.normal_(
+                self.bbox_out_adapter_down.weight,
+                std=1 / bbox_lora_rank
+            )
+
+            self.bbox_out_adapter_up = nn.Linear(
+                bbox_lora_rank,
+                query_dim,
+                bias=False
+            )
+            nn.init.zeros_(
+                self.bbox_out_adapter_up.weight
+            )
 
     def forward(
             self,
@@ -330,7 +449,10 @@ class MemoryEfficientCrossAttention(nn.Module):  # we are using this implementat
             mask=None,
             additional_tokens=None,
             n_times_crossframe_attn_in_self=0,
-            batchify_xformers=False
+            batchify_xformers=False,
+            
+            # bbox
+            bbox_context=None
     ):
         if additional_tokens is not None:
             # get the number of masked tokens at the beginning of the output sequence
@@ -341,9 +463,11 @@ class MemoryEfficientCrossAttention(nn.Module):  # we are using this implementat
         context = default(context, x)
         if self.action_control:
             context, context_ = context[:, :, :self.context_dim], context[:, :, self.context_dim:]
+        
         q = self.to_q(x)
         k = self.to_k(context)
         v = self.to_v(context)
+        
         if self.add_lora:
             q += self.q_adapter_up(self.q_adapter_down(x)) * self.lora_scale
             k += self.k_adapter_up(self.k_adapter_down(context)) * self.lora_scale
@@ -352,6 +476,39 @@ class MemoryEfficientCrossAttention(nn.Module):  # we are using this implementat
             k += self.k_adapter_action_control(context_)
             v += self.v_adapter_action_control(context_)
 
+        # bbox-specific LoRA
+        if self.bbox_control and bbox_context is not None:
+            q_bbox_lora = (
+                self.bbox_q_adapter_up(
+                    self.bbox_q_adapter_down(x)
+                )
+                * self.bbox_lora_scale
+            )
+
+            k_bbox_lora = (
+                self.bbox_k_adapter_up(
+                    self.bbox_k_adapter_down(context)
+                )
+                * self.bbox_lora_scale
+            )
+
+            v_bbox_lora = (
+                self.bbox_v_adapter_up(
+                    self.bbox_v_adapter_down(context)
+                )
+                * self.bbox_lora_scale
+            )
+
+            k_bbox = self.k_adapter_bbox(bbox_context)
+            v_bbox = self.v_adapter_bbox(bbox_context)
+
+            q += q_bbox_lora
+            k += k_bbox_lora
+            v += v_bbox_lora
+
+            k = torch.cat([k, k_bbox], dim=1)
+            v = torch.cat([v, v_bbox], dim=1)
+            
         if n_times_crossframe_attn_in_self:
             # reprogramming cross-frame attention as in https://arxiv.org/abs/2303.13439
             assert x.shape[0] % n_times_crossframe_attn_in_self == 0
@@ -415,10 +572,31 @@ class MemoryEfficientCrossAttention(nn.Module):  # we are using this implementat
         if additional_tokens is not None:
             # remove additional token
             out = out[:, n_tokens_to_mask:]
+        
+        output = self.to_out(out)
+
+        # Existing VISTA LoRA
         if self.add_lora:
-            return self.to_out(out) + self.out_adapter_up(self.out_adapter_down(out)) * self.lora_scale
-        else:
-            return self.to_out(out)
+            output = output + (
+                self.out_adapter_up(
+                    self.out_adapter_down(out)
+                )
+                * self.lora_scale
+            )
+
+        # Bbox-specific LoRA
+        if self.bbox_control and bbox_context is not None:
+            bbox_out_lora = (
+                self.bbox_out_adapter_up(
+                    self.bbox_out_adapter_down(out)
+                )
+                * self.bbox_lora_scale
+            )
+
+            output = output + bbox_out_lora
+
+
+        return output
 
 
 class BasicTransformerBlock(nn.Module):
@@ -440,7 +618,11 @@ class BasicTransformerBlock(nn.Module):
             attn_mode="softmax",
             sdp_backend=None,
             add_lora=False,
-            action_control=False
+            action_control=False,
+            
+            # bbox
+            bbox_control=False,
+            bbox_dim=256
     ):
         super().__init__()
         assert attn_mode in self.ATTENTION_MODES
@@ -483,7 +665,11 @@ class BasicTransformerBlock(nn.Module):
             dropout=dropout,
             backend=sdp_backend,
             add_lora=add_lora,
-            action_control=action_control
+            action_control=action_control,
+            
+            # bbox
+            bbox_control=bbox_control,
+            bbox_dim=bbox_dim
         )  # is self-attn if context is None
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
@@ -505,20 +691,19 @@ class BasicTransformerBlock(nn.Module):
             kwargs.update({"n_times_crossframe_attn_in_self": n_times_crossframe_attn_in_self})
 
         if self.use_checkpoint:
-            # inputs = {"x": x, "context": context}
-            # return checkpoint(self._forward, inputs, self.parameters(), self.use_checkpoint)
             return checkpoint(self._forward, x, context)
         else:
             return self._forward(**kwargs)
 
-    def _forward(self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0):
+    def _forward(self, x, context=None, additional_tokens=None, n_times_crossframe_attn_in_self=0): # bbox
         # spatial self-attn
         x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None,
                        additional_tokens=additional_tokens,
                        n_times_crossframe_attn_in_self=n_times_crossframe_attn_in_self
                        if not self.disable_self_attn else 0) + x
+        
         # spatial cross-attn
-        x = self.attn2(self.norm2(x), context=context, additional_tokens=additional_tokens) + x
+        x = self.attn2(self.norm2(x), context=context, additional_tokens=additional_tokens) + x # bbox
         # feedforward
         x = self.ff(self.norm3(x)) + x
         return x
@@ -548,7 +733,11 @@ class SpatialTransformer(nn.Module):
             use_checkpoint=False,
             sdp_backend=None,
             add_lora=False,
-            action_control=False
+            action_control=False,
+            
+            # bbox
+            bbox_control=False,
+            bbox_dim=256
     ):
         super().__init__()
         print(f"Constructing {self.__class__.__name__} of depth {depth} w/ {in_channels} channels and {n_heads} heads")
@@ -593,7 +782,11 @@ class SpatialTransformer(nn.Module):
                     use_checkpoint=use_checkpoint,
                     sdp_backend=sdp_backend,
                     add_lora=add_lora,
-                    action_control=action_control
+                    action_control=action_control,
+                    
+                    # bbox
+                    bbox_control=bbox_control,
+                    bbox_dim=bbox_dim
                 )
                 for d in range(depth)
             ]

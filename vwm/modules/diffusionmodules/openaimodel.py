@@ -35,7 +35,12 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
             emb: torch.Tensor,
             context: Optional[torch.Tensor] = None,
             time_context: Optional[int] = None,
-            num_frames: Optional[int] = None
+            num_frames: Optional[int] = None,
+            
+            # bbox
+            bbox_features=None,
+            bbox_coords=None,
+            bbox_mask=None
     ):
         from .video_model import VideoResBlock
 
@@ -45,7 +50,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
             elif isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialVideoTransformer):
-                x = layer(x, context, time_context, num_frames)
+                x = layer(x, context, time_context, num_frames, bbox_features=bbox_features, bbox_coords=bbox_coords, bbox_mask=bbox_mask) # bbox
             elif isinstance(layer, SpatialTransformer):
                 x = layer(x, context)
             else:
